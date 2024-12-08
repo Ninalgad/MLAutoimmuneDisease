@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, IterableDataset
-
+import numpy as np
 from h5_utils import read_assets_from_h5
 from utils import load_adata
 
@@ -11,8 +11,8 @@ from utils import load_adata
 
 
 def create_dataloader(tile_h5_paths, expr_paths, genes, normalize, img_transform, size_subset,
-                      batch_size=8, training=False, num_workers=0):
-    tile_dataset = H5Dataset(tile_h5_paths, expr_paths, genes, normalize, repeat=training,
+                      batch_size=8, shuffle=False, num_workers=0):
+    tile_dataset = H5Dataset(tile_h5_paths, expr_paths, genes, normalize, shuffle=shuffle,
                              chunk_size=size_subset, img_transform=img_transform)
     tile_dataloader = torch.utils.data.DataLoader(
         tile_dataset,
@@ -31,9 +31,9 @@ def preprocess_batch(batch):
     return batch
 
 
-class H5Dataset(torch.utils.data.IterableDataset):
+class H5Dataset(IterableDataset):
 
-    def __init__(self, h5_paths, expr_paths, genes, normalize, repeat,
+    def __init__(self, h5_paths, expr_paths, genes, normalize, shuffle=False,
                  img_transform=None, chunk_size=1000):
         self.h5_paths = h5_paths
         self.expr_paths = expr_paths
@@ -42,7 +42,7 @@ class H5Dataset(torch.utils.data.IterableDataset):
         self.img_transform = img_transform
         self.chunk_size = chunk_size
         self.n_paths = len(h5_paths)
-        self.repeat = repeat
+        self.shuffle = shuffle
 
     def _assign_assets(self, idx):
         self.assets, _ = read_assets_from_h5(self.h5_paths[idx])
@@ -59,6 +59,8 @@ class H5Dataset(torch.utils.data.IterableDataset):
             self._assign_assets(i)
 
             for j in range(self.chunk_size):
+                if self.shuffle:
+                    j = np.random.choice(self.chunk_size)
                 item = {k: torch.tensor(v[j], dtype=torch.float32)
                         for (k, v) in self.assets.items() if k != 'barcode'}
 

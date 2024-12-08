@@ -3,10 +3,12 @@ import torch
 import torch.nn.functional as F
 import os
 import json
+import torchvision
 from torch.optim import Adam
 from tqdm.notebook import tqdm
 
-from model import SimpNet
+from model import JointNet
+from encoder import EncoderNet, SparseEncoderNet
 from dataset import create_dataloader
 from eval import evaluate_metric
 
@@ -36,7 +38,7 @@ class DiceBCELoss(nn.Module):
 
 # https://www.kaggle.com/code/bigironsphere/loss-function-library-keras-pytorch
 class FocalLoss(nn.Module):
-    def __init__(self, from_logits=False, weight=None, size_average=True):
+    def __init__(self, from_logits=False):
         super(FocalLoss, self).__init__()
         self.from_logits = from_logits
 
@@ -61,47 +63,103 @@ def segmentation_loss_func(outputs, tar):
            3 * FocalLoss(from_logits=True)(outputs, tar)
 
 
-def regression_loss_func(outputs, tar):
+def regression_loss_func_l2(outputs, tar):
     return nn.MSELoss()(outputs, tar)
 
 
-def train_step(batch, model, optimizer, device):
-    batch = {k: v.to(device).float() for (k, v) in batch.items() if k != 'coords'}
-    optimizer.zero_grad()
-
-    prd_seg, prd_reg = model(batch['img'])
-
-    loss_ = segmentation_loss_func(prd_seg, batch['mask']) + regression_loss_func(prd_reg, batch['adata'])
-
-    loss_.backward()
-    optimizer.step()
-
-    return loss_.detach().cpu().numpy()
+def regression_loss_func_l1(outputs, tar):
+    return nn.L1Loss()(outputs, tar)
 
 
-def train_finetune(args, train_df, validation_df):
+def train_joint(args, train_df, validation_df):
     with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
         genes = json.load(f)['genes']
 
     train_loader = create_dataloader(
         train_df.patches_path.values, train_df.expr_path.values, genes,
         args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker, training=True
+        batch_size=args.batch_size, num_workers=args.num_worker, shuffle=True
     )
 
+    val_loader = create_dataloader(
+        validation_df.patches_path.values, validation_df.expr_path.values, genes,
+        args.normalize, img_transform=None, size_subset=args.size_subset,
+        batch_size=args.batch_size, num_workers=args.num_worker,
+    )
+
+    def train_step_joint(batch, model, optimizer, device):
+        batch = {k: v.to(device).float() for (k, v) in batch.items() if k != 'coords'}
+        optimizer.zero_grad()
+
+        output = model(batch['img'])
+
+        loss_ = segmentation_loss_func(output['seg'], batch['mask']) + regression_loss_func_l2(output['reg'], batch['adata'])
+
+        loss_.backward()
+        optimizer.step()
+
+        return loss_.detach().cpu().numpy()
+
     print('training')
-    weights = None
-    if args.pretrained:
-        weights = 'IMAGENET1K_V1'
-    model = SimpNet(weights=weights)
+    model = JointNet(pretrained=args.pretrained)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 
     optimizer = Adam(model.parameters(), lr=args.learning_rate)
 
-    best_ep = 0
+    return training_loop(args, train_step_joint,
+                         train_loader, val_loader,
+                         model, optimizer, device)
+
+
+def train_encoder(args, train_df, validation_df):
+    with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
+        genes = json.load(f)['genes']
+
+    train_loader = create_dataloader(
+        train_df.patches_path.values, train_df.expr_path.values, genes,
+        args.normalize, img_transform=None, size_subset=args.size_subset,
+        batch_size=args.batch_size, num_workers=args.num_worker, shuffle=True
+    )
+
+    val_loader = create_dataloader(
+        validation_df.patches_path.values, validation_df.expr_path.values, genes,
+        args.normalize, img_transform=None, size_subset=args.size_subset,
+        batch_size=args.batch_size, num_workers=args.num_worker,
+    )
+
+    def train_step_encoder(batch, model, optimizer, device):
+        batch = {k: v.to(device).float() for (k, v) in batch.items() if k not in {'coords', 'mask'}}
+        optimizer.zero_grad()
+
+        output = model(batch['img'])
+
+        loss_ = regression_loss_func_l2(output['reg'], batch['adata'])
+
+        loss_.backward()
+        optimizer.step()
+
+        return loss_.detach().cpu().numpy()
+
+    print('training: EncoderNet vgg16 L2Loss')
+    model = torchvision.models.vgg16(weights='IMAGENET1K_V1').features
+    model = EncoderNet(model, 512)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
+    optimizer = Adam(model.parameters(), lr=args.learning_rate)
+
+    return training_loop(args, train_step_encoder,
+                         train_loader, val_loader,
+                         model, optimizer, device)
+
+
+def training_loop(args, train_step,
+                  train_loader, val_loader,
+                  model, optimizer, device,
+                  monitor="overall_l2"):
+    best_res = {monitor: float('inf')}
     global_step = 0
-    best_val = float('inf')
 
     steps_per_epoch = len(train_loader)
 
@@ -110,9 +168,7 @@ def train_finetune(args, train_df, validation_df):
         num_epochs, val_epoch = 1, 0
 
     for epoch in range(num_epochs):
-        print(
-            f'Iter: {global_step}, Ep: {global_step / steps_per_epoch}, '
-            f'Current Best: {best_val}, Best Ep: {best_ep}')
+        print(f'Iter: {global_step}, Ep: {epoch}, Current Best: {best_res[monitor]}')
         model.train()
         train_loss = []
 
@@ -125,19 +181,16 @@ def train_finetune(args, train_df, validation_df):
                 break
 
         if epoch >= val_epoch:
-            print(f"Current Best Val loss: {best_val}, Best Ep: {best_ep}\n")
+            print(f"Current Best Val loss: {best_res[monitor]}")
             with torch.no_grad():
-                val = evaluate_metric(args, validation_df, genes, model, device)
+                res = evaluate_metric(args, val_loader, model, device)
 
-            print(f"Val: {val}")
-            if val < best_val:
-                print(f"{epoch} New best l2: {val} under {best_val}")
-                best_val = val
-                best_ep = epoch
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'best_val': best_val,
-                }, f'{args.model_name}.pt')
+            print(f"Val Score: {res}")
+            if res[monitor] < best_res[monitor]:
+                print(f"{epoch} New best: {res[monitor]} under {best_res[monitor]}")
+                best_res = res
+                best_res['model_state_dict'] = model.state_dict()
+                best_res['best_ep'] = epoch
+                torch.save(best_res, f'{args.model_name}.pt')
 
-    return best_val
+    return best_res

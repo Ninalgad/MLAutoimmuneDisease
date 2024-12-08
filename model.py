@@ -282,13 +282,20 @@ def point_wise_feed_forward_network(d_in, d_out, dff):
     )
 
 
-class SimpNet(nn.Module):
+def _get_weights_name(pretrained):
+    weights = None
+    if pretrained:
+        weights = 'IMAGENET1K_V1'
+    return weights
+
+
+class JointNet(nn.Module):
     def __init__(self, seg_output_dim=1, reg_output_dim=460,
-                 weights=None, hidden_dim=128, freeze_encoder=False):
+                 pretrained=False, hidden_dim=128, freeze_encoder=False):
         super().__init__()
 
         self.frame_head = point_wise_feed_forward_network(256, reg_output_dim, hidden_dim)
-        self.encoder = UNet16(num_classes=hidden_dim, weights=weights)
+        self.encoder = UNet16(num_classes=hidden_dim, weights=_get_weights_name(pretrained))
         self.hidden_layer = nn.Conv2d(hidden_dim, hidden_dim, 1)
         self.segmentation_head = nn.Conv2d(hidden_dim, seg_output_dim, 1)
 
@@ -307,4 +314,4 @@ class SimpNet(nn.Module):
         x = self.hidden_layer(x)
         x = torch.nn.ReLU()(x)
         x = self.segmentation_head(x)
-        return x, c
+        return {'seg': x, 'reg': c}
