@@ -10,7 +10,7 @@ from tqdm.notebook import tqdm
 from model import JointNet
 from encoder import EncoderNet, SparseEncoderNet
 from dataset import create_dataloader
-from eval import evaluate_metric
+from eval import evaluate_metric, evaluate_metric_optimized
 
 
 # https://www.kaggle.com/code/bigironsphere/loss-function-library-keras-pytorch
@@ -58,13 +58,19 @@ class FocalLoss(nn.Module):
         return focal_loss
 
 
-def segmentation_loss_func(outputs, tar):
-    return DiceBCELoss(from_logits=True)(outputs, tar) + \
-           3 * FocalLoss(from_logits=True)(outputs, tar)
+def segmentation_loss_func(outputs, tar, from_logits=False):
+    return DiceBCELoss(from_logits=from_logits)(outputs, tar) + \
+           3 * FocalLoss(from_logits=from_logits)(outputs, tar)
 
 
 def regression_loss_func_l2(outputs, tar):
     return nn.MSELoss()(outputs, tar)
+
+
+def masked_loss_func_l2(outputs, tar, mask):
+    loss_ = (outputs - tar) ** 2
+    loss_ = (mask * loss_).sum() / mask.sum()
+    return loss_
 
 
 def regression_loss_func_l1(outputs, tar):
@@ -109,7 +115,8 @@ def train_joint(args, train_df, validation_df):
 
     return training_loop(args, train_step_joint,
                          train_loader, val_loader,
-                         model, optimizer, device)
+                         model, optimizer, device,
+                         evaluate_metric)
 
 
 def train_encoder(args, train_df, validation_df):
@@ -151,12 +158,61 @@ def train_encoder(args, train_df, validation_df):
 
     return training_loop(args, train_step_encoder,
                          train_loader, val_loader,
-                         model, optimizer, device)
+                         model, optimizer, device,
+                         evaluate_metric)
+
+
+def train_encoder_binary_optimized(args, train_df, validation_df):
+    with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
+        genes = json.load(f)['genes']
+
+    train_loader = create_dataloader(
+        train_df.patches_path.values, train_df.expr_path.values, genes,
+        args.normalize, img_transform=None, size_subset=args.size_subset,
+        batch_size=args.batch_size, num_workers=args.num_worker, shuffle=True
+    )
+
+    val_loader = create_dataloader(
+        validation_df.patches_path.values, validation_df.expr_path.values, genes,
+        args.normalize, img_transform=None, size_subset=args.size_subset,
+        batch_size=args.batch_size, num_workers=args.num_worker,
+    )
+
+    def train_step_encoder(batch, model, optimizer, device):
+        batch = {k: v.to(device).float() for (k, v) in batch.items() if k not in {'coords', 'mask'}}
+        optimizer.zero_grad()
+
+        target_reg = batch['adata']
+        target_bin = (target_reg.detach().clone() > 0).float()
+
+        output = model(batch['img'])
+
+        loss_ = masked_loss_func_l2(output['reg'], target_reg, target_bin.clone()) +\
+                segmentation_loss_func(output['bin'], target_bin)
+
+        loss_.backward()
+        optimizer.step()
+
+        return loss_.detach().cpu().numpy()
+
+    print('training: optimized EncoderNet vgg16')
+    model = torchvision.models.vgg16(weights='IMAGENET1K_V1').features
+    model = EncoderNet(model, 512)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
+    optimizer = Adam(model.parameters(), lr=args.learning_rate)
+
+    return training_loop(args, train_step_encoder,
+                         train_loader, val_loader,
+                         model, optimizer, device,
+                         evaluate_metric_optimized)
 
 
 def training_loop(args, train_step,
                   train_loader, val_loader,
                   model, optimizer, device,
+                  evaluation_func,
                   monitor="overall_l2"):
     best_res = {monitor: float('inf')}
     global_step = 0
@@ -172,7 +228,8 @@ def training_loop(args, train_step,
         model.train()
         train_loss = []
 
-        for i, batch in tqdm(enumerate(train_loader), total=steps_per_epoch):
+        # for i, batch in tqdm(enumerate(train_loader), total=steps_per_epoch):
+        for i, batch in enumerate(train_loader):
             loss = train_step(batch, model, optimizer, device)
 
             train_loss.append(loss)
@@ -183,7 +240,7 @@ def training_loop(args, train_step,
         if epoch >= val_epoch:
             print(f"Current Best Val loss: {best_res[monitor]}")
             with torch.no_grad():
-                res = evaluate_metric(args, val_loader, model, device)
+                res = evaluation_func(args, val_loader, model, device)
 
             print(f"Val Score: {res}")
             if res[monitor] < best_res[monitor]:
