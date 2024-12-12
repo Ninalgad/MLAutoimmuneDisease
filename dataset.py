@@ -5,11 +5,6 @@ from h5_utils import read_assets_from_h5
 from utils import load_adata
 
 
-#########
-# Torch Dataset & Embeddings
-#########
-
-
 def create_dataloader(tile_h5_paths, expr_paths, genes, normalize, img_transform, size_subset,
                       batch_size=8, shuffle=False, num_workers=0):
     tile_dataset = H5Dataset(tile_h5_paths, expr_paths, genes, normalize, shuffle=shuffle,
@@ -31,10 +26,14 @@ def preprocess_batch(batch):
     return batch
 
 
+def preprocess_image(img):
+    return img.astype('float32') / 255
+
+
 class H5Dataset(IterableDataset):
 
     def __init__(self, h5_paths, expr_paths, genes, normalize, shuffle=False,
-                 img_transform=None, chunk_size=1000):
+                 img_transform=None, chunk_size=None):
         self.h5_paths = h5_paths
         self.expr_paths = expr_paths
         self.genes = genes
@@ -44,6 +43,14 @@ class H5Dataset(IterableDataset):
         self.n_paths = len(h5_paths)
         self.shuffle = shuffle
 
+        self._get_size()
+
+    def _get_size(self):
+        self._size = 0
+        for i in range(self.n_paths):
+            self._assign_assets(i)
+            self._size += len(self.assets['barcode'])
+
     def _assign_assets(self, idx):
         self.assets, _ = read_assets_from_h5(self.h5_paths[idx])
         barcodes = self.assets['barcode'].flatten().astype(str).tolist()
@@ -52,7 +59,7 @@ class H5Dataset(IterableDataset):
         self.assets['adata'] = adata.values
 
     def __len__(self):
-        return self.n_paths * self.chunk_size
+        return self._size
 
     def _gen(self):
         for i in range(self.n_paths):
@@ -61,8 +68,15 @@ class H5Dataset(IterableDataset):
             for j in range(self.chunk_size):
                 if self.shuffle:
                     j = np.random.choice(self.chunk_size)
-                item = {k: torch.tensor(v[j], dtype=torch.float32)
-                        for (k, v) in self.assets.items() if k != 'barcode'}
+
+                barcode = self.assets['barcode'][j].item().decode('UTF-8')
+                barcode = int(barcode[1:])
+
+                item = {'img': preprocess_image(self.assets['img'][j]),
+                        'adata': self.assets['adata'][j],
+                        'mask': self.assets['mask'][j] == barcode}
+                item = {k: torch.tensor(v, dtype=torch.float32)
+                        for (k, v) in item.items()}
 
                 if self.img_transform is not None:
                     item['img'], item['mask'] = self.img_transform(image=item['img'], mask=item['mask'])

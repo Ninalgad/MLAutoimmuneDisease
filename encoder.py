@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from utils import inflate_mask
+
 
 def mlp(d_in, d_out, dff):
     return nn.Sequential(
@@ -13,36 +15,61 @@ def mlp(d_in, d_out, dff):
     )
 
 
-def sparse_mlp(d_in, d_out, dff):
-    return nn.Sequential(
-        nn.Linear(d_in, dff),
-        JumpReLU(),
-        nn.Linear(dff, dff),
-        JumpReLU(),
-        nn.Linear(dff, d_out)
-    )
-
-
 class EncoderNet(nn.Module):
     def __init__(self, features_encoder, encoder_output_dim,
                  output_dim=460, hidden_dim=128):
         super().__init__()
 
         self.reg_head = mlp(encoder_output_dim, output_dim, hidden_dim)
-        self.bin_head = mlp(encoder_output_dim, output_dim, hidden_dim)
         self.encoder = features_encoder
 
     def forward(self, x):
         x = self.encoder(x)
 
         x = F.max_pool2d(x, kernel_size=x.size()[2:])
-        x_pooled = torch.squeeze(x, dim=(2, 3))
+        x = torch.squeeze(x, dim=(2, 3))
 
-        r = torch.nn.Softplus()(self.reg_head(x_pooled))
+        r = torch.nn.Softplus()(self.reg_head(x))
 
-        b = torch.nn.Sigmoid()(self.bin_head(x_pooled))
+        return {'reg': r}
 
-        return {'reg': r, 'bin': b}
+
+class GateLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.alpha = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, x, m):
+        return x + self.alpha * m
+
+
+class ConjoinedNet(nn.Module):
+    def __init__(self, features_encoder, encoder_output_dim,
+                 output_dim=460, hidden_dim=128):
+        super().__init__()
+        self.reg_head = mlp(encoder_output_dim, output_dim, hidden_dim)
+        self.encoder = features_encoder
+        self.n_enc_layers = len(features_encoder)
+        self.gates = [GateLayer() for _ in range(self.n_enc_layers)]
+
+    def forward(self, img, mask):
+        x, m = img, inflate_mask(mask)
+        for i in range(self.n_enc_layers):
+            u, v = self.encoder[i](x), self.encoder[i](m)
+
+            x = self.gates[i](u, v)
+            m = v
+
+        x = F.max_pool2d(x, kernel_size=x.size()[2:])
+        x = torch.squeeze(x, dim=(2, 3))
+
+        r = torch.nn.Softplus()(self.reg_head(x))
+
+        return {'reg': r}
+
+
+def heaviside_step(x):
+    return (x > 0).float()
 
 
 class JumpReLU(torch.nn.Module):
@@ -50,9 +77,18 @@ class JumpReLU(torch.nn.Module):
         super().__init__()
         self.jump = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, x):
-        heaviside_step = (x > self.jump).float()
-        return x * heaviside_step
+    def forward(self, inp):
+        h = heaviside_step(inp - self.jump)
+        out = inp * h
+        sparcity = h.sum()
+        return out, sparcity
+
+
+class SAE(nn.Module):
+    def __init__(self, input_dim,
+                 output_dim, hidden_dim=128):
+        super().__init__()
+        pass
 
 
 class SparseEncoderNet(nn.Module):
@@ -60,7 +96,7 @@ class SparseEncoderNet(nn.Module):
                  output_dim=460, hidden_dim=128):
         super().__init__()
 
-        self.frame_head = sparse_mlp(encoder_output_dim, output_dim, hidden_dim)
+        self.frame_head = mlp(encoder_output_dim, output_dim, hidden_dim)
         self.encoder = features_encoder
 
     def forward(self, x):

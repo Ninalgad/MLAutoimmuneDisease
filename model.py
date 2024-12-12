@@ -314,4 +314,5 @@ class JointNet(nn.Module):
         x = self.hidden_layer(x)
         x = torch.nn.ReLU()(x)
         x = self.segmentation_head(x)
+        x = nn.Sigmoid()(x)
         return {'seg': x, 'reg': c}

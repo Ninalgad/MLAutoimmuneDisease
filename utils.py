@@ -1,9 +1,14 @@
 import numpy as np
 import scanpy as sc
+import torch
 
 ###############
 # utils fct
 ###############
+
+
+def inflate_mask(m):
+    return torch.cat([m, m, m], dim=1)
 
 
 def log1p_normalization(arr):

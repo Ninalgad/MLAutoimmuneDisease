@@ -106,7 +106,7 @@ def read_assets_from_h5(h5_path, keys=None, skip_attrs=False, skip_assets=False)
 
 
 class Patcher:
-    def __init__(self, image, mask, coords, patch_size_target, name=None):
+    def __init__(self, image, coords, patch_size_target, mask=None, name=None):
         """
         Initializes the patcher object to extract patches (localized square sub-region of an image) from an image at specified coordinates.
 
@@ -139,8 +139,9 @@ class Patcher:
             img_patch = np.zeros((self.patch_size_target, self.patch_size_target, 3), dtype=np.uint8)
             img_patch[:y_end - y_start, :x_end - x_start, :] = self.image[y_start:y_end, x_start:x_end, :]
 
-            mask_patch = np.zeros((self.patch_size_target, self.patch_size_target, 1), dtype=np.uint8)
-            mask_patch[:y_end - y_start, :x_end - x_start, :] = self.mask[y_start:y_end, x_start:x_end, :]
+            mask_patch = np.zeros((self.patch_size_target, self.patch_size_target, 1), dtype=np.uint32)
+            if self.mask is not None:
+                mask_patch[:y_end - y_start, :x_end - x_start, :] = self.mask[y_start:y_end, x_start:x_end, :]
 
             yield img_patch, mask_patch, x, y
 
@@ -234,9 +235,11 @@ class Patcher:
             # Prepare the data to be saved for this patch
             asset_dict = {
                 'img': np.expand_dims(img_tile, axis=0),  # Shape (1, h, w, 3)
-                'mask': np.expand_dims(mask_tile, axis=0),  # Shape (1, h, w, 3)
                 'coords': np.expand_dims([x, y], axis=0)  # Shape (1, 2)
             }
+
+            if self.mask is not None:
+                asset_dict['mask'] = np.expand_dims(mask_tile, axis=0),  # Shape (1, h, w, 1)
 
             # Add any extra assets to the asset dictionary
             extra_asset_dict = {key: np.expand_dims([value[i]], axis=0) for key, value in extra_assets.items()}
