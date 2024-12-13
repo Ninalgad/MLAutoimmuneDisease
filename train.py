@@ -7,10 +7,11 @@ import torchvision
 from torch.optim import Adam
 from tqdm.notebook import tqdm
 
-from model import JointNet
 from encoder import EncoderNet, ConjoinedNet
 from dataset import create_dataloader
-from eval import evaluate_metric, evaluate_metric_optimized, evaluate_metric_conj
+from eval import evaluate_metric, evaluate_metric_conj
+from sae import PartiallySupervisedSAENet
+import utils
 
 
 # https://www.kaggle.com/code/bigironsphere/loss-function-library-keras-pytorch
@@ -77,48 +78,6 @@ def regression_loss_func_l1(outputs, tar):
     return nn.L1Loss()(outputs, tar)
 
 
-def train_joint(args, train_df, validation_df):
-    with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
-        genes = json.load(f)['genes']
-
-    train_loader = create_dataloader(
-        train_df.patches_path.values, train_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker, shuffle=True
-    )
-
-    val_loader = create_dataloader(
-        validation_df.patches_path.values, validation_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker,
-    )
-
-    def train_step_joint(batch, model, optimizer, device):
-        batch = {k: v.to(device).float() for (k, v) in batch.items() if k != 'coords'}
-        optimizer.zero_grad()
-
-        output = model(batch['img'])
-
-        loss_ = segmentation_loss_func(output['seg'], batch['mask']) + regression_loss_func_l2(output['reg'], batch['adata'])
-
-        loss_.backward()
-        optimizer.step()
-
-        return loss_.detach().cpu().numpy()
-
-    print('training')
-    model = JointNet(pretrained=args.pretrained)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-
-    optimizer = Adam(model.parameters(), lr=args.learning_rate)
-
-    return training_loop(args, train_step_joint,
-                         train_loader, val_loader,
-                         model, optimizer, device,
-                         evaluate_metric)
-
-
 def train_encoder(args, train_df, validation_df):
     with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
         genes = json.load(f)['genes']
@@ -156,7 +115,7 @@ def train_encoder(args, train_df, validation_df):
 
     optimizer = Adam(model.parameters(), lr=args.learning_rate)
 
-    return training_loop(args, train_step_encoder,
+    return training_loop(args, f'{args.model_name}.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
                          evaluate_metric)
@@ -197,18 +156,15 @@ def train_conjoined_encoder(args, train_df, validation_df):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 
-    for layer in model.gates:
-        layer.to(device)
-
     optimizer = Adam(model.parameters(), lr=args.learning_rate)
 
-    return training_loop(args, train_step_encoder,
+    return training_loop(args, f'{args.model_name}.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
                          evaluate_metric_conj)
 
 
-def train_encoder_binary_optimized(args, train_df, validation_df):
+def train_sae(args, train_df, validation_df):
     with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
         genes = json.load(f)['genes']
 
@@ -225,37 +181,45 @@ def train_encoder_binary_optimized(args, train_df, validation_df):
     )
 
     def train_step_encoder(batch, model, optimizer, device):
-        batch = {k: v.to(device).float() for (k, v) in batch.items() if k not in {'coords', 'mask'}}
+        batch = {k: v.to(device).float() for (k, v) in batch.items() if k != 'coords'}
         optimizer.zero_grad()
 
-        target_reg = batch['adata']
-        target_bin = (target_reg.detach().clone() > 0).float()
+        output = model(batch['img'], batch['mask'])
 
-        output = model(batch['img'])
+        sparsity_loss = utils.heaviside_step(output['features'] - 0.01)
+        sparsity_loss = sparsity_loss.mean() ** 0.5
 
-        loss_ = masked_loss_func_l2(output['reg'], target_reg, target_bin.clone()) +\
-                segmentation_loss_func(output['bin'], target_bin)
+        loss_ = regression_loss_func_l2(output['reg'], batch['adata'])
+        loss_ += regression_loss_func_l2(output['reconstructed'], output['activations'])
+        loss_ += 1e-2 * sparsity_loss
 
         loss_.backward()
         optimizer.step()
 
         return loss_.detach().cpu().numpy()
 
-    print('training: optimized EncoderNet vgg16')
-    model = torchvision.models.efficientnet_v2_s(weights='IMAGENET1K_V1').features
-    model = EncoderNet(model, 512)
+    print('training SAE ConjoinedNet efficientnet_v2_s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    model = torchvision.models.efficientnet_v2_s().features
+    model = ConjoinedNet(model, 1280)
+    model.to(device)
+
+    model.load_state_dict(torch.load(args.weights_root, device)['model_state_dict'])
+
+    model = PartiallySupervisedSAENet(
+        model, activation_output_dim=1280, reg_output_dim=460, n_features=32 * 1280)
     model.to(device)
 
     optimizer = Adam(model.parameters(), lr=args.learning_rate)
 
-    return training_loop(args, train_step_encoder,
+    return training_loop(args, f'{args.model_name}-sae.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
-                         evaluate_metric_optimized)
+                         evaluate_metric_conj)
 
 
-def training_loop(args, train_step,
+def training_loop(args, weights_save_path, train_step,
                   train_loader, val_loader,
                   model, optimizer, device,
                   evaluation_func,
@@ -298,8 +262,8 @@ def training_loop(args, train_step,
                 best_res = res
                 best_res['model_state_dict'] = model.state_dict()
                 best_res['global_step'] = global_step
-                best_res['best_ep'] = epoch
-                torch.save(best_res, f'{args.model_name}.pt')
+                best_res['epoch'] = epoch
+                torch.save(best_res, weights_save_path)
                 del best_res['model_state_dict']
 
     return best_res

@@ -43,13 +43,13 @@ class H5Dataset(IterableDataset):
         self.n_paths = len(h5_paths)
         self.shuffle = shuffle
 
-        self._get_size()
+        self._get_sizes()
 
-    def _get_size(self):
-        self._size = 0
+    def _get_sizes(self):
+        self.chunk_sizes = []
         for i in range(self.n_paths):
             self._assign_assets(i)
-            self._size += len(self.assets['barcode'])
+            self.chunk_sizes.append(len(self.assets['barcode']))
 
     def _assign_assets(self, idx):
         self.assets, _ = read_assets_from_h5(self.h5_paths[idx])
@@ -59,15 +59,16 @@ class H5Dataset(IterableDataset):
         self.assets['adata'] = adata.values
 
     def __len__(self):
-        return self._size
+        return sum(self.chunk_sizes)
 
     def _gen(self):
         for i in range(self.n_paths):
             self._assign_assets(i)
 
-            for j in range(self.chunk_size):
+            size = self.chunk_sizes[i]
+            for j in range(size):
                 if self.shuffle:
-                    j = np.random.choice(self.chunk_size)
+                    j = np.random.choice(size)
 
                 barcode = self.assets['barcode'][j].item().decode('UTF-8')
                 barcode = int(barcode[1:])

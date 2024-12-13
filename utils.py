@@ -7,6 +7,10 @@ import torch
 ###############
 
 
+def heaviside_step(x):
+    return (x > 0).float()
+
+
 def inflate_mask(m):
     return torch.cat([m, m, m], dim=1)
 
