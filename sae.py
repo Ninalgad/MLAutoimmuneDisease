@@ -22,17 +22,17 @@ class SoftSAE(nn.Module):
         self.enc = nn.Linear(input_dim, width)
         self.dec = nn.Linear(width, input_dim)
 
-        nn.init.zeros_(self.enc.bias)
-        nn.init.zeros_(self.dec.bias)
-
         with torch.no_grad():
+            nn.init.zeros_(self.enc.bias)
+            nn.init.zeros_(self.dec.bias)
+
             self.enc.weight = nn.Parameter(self.dec.weight.t().clone())
 
-        nn.utils.parametrizations.weight_norm(self.dec, 'weight')
+            nn.utils.parametrizations.weight_norm(self.dec, 'weight')
 
     def forward(self, inp):
         feat = self.enc(inp)
-        feat = nn.Softplus()(feat)
+        feat = nn.Softplus()(feat - 4.0)
         rec = self.dec(feat)
 
         return {'reconstructed': rec, 'features': feat}
@@ -56,26 +56,19 @@ class SAENet(nn.Module):
 
 
 class PartiallySupervisedSAENet(nn.Module):
-    def __init__(self, network, activation_output_dim, reg_output_dim, n_features):
+    def __init__(self, activation_output_dim, reg_output_dim, n_features):
         super().__init__()
         self.sae = SoftSAE(activation_output_dim, n_features)
-        self.network = network
         self.reg_dim = reg_output_dim
 
-        # freeze network weights
-        for param in self.network.parameters():
-            param.requires_grad = False
-
-    def forward(self, img, mask):
-        activations = self.network(img, mask)['embedding']
-        sae_output = self.sae(activations)
+    def forward(self, img):
+        sae_output = self.sae(img)
 
         features = sae_output['features']
 
         output = {
             'reconstructed': sae_output['reconstructed'],
             'reg': features[:, :self.reg_dim],
-            'activations': activations,
             'features': features[:, self.reg_dim:]
         }
         return output

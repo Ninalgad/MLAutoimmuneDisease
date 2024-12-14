@@ -5,10 +5,10 @@ from h5_utils import read_assets_from_h5
 from utils import load_adata
 
 
-def create_dataloader(tile_h5_paths, expr_paths, genes, normalize, img_transform, size_subset,
-                      batch_size=8, shuffle=False, num_workers=0):
+def create_h5_dataloader(tile_h5_paths, expr_paths, genes, normalize, img_transform,
+                         batch_size=8, shuffle=False, num_workers=0):
     tile_dataset = H5Dataset(tile_h5_paths, expr_paths, genes, normalize, shuffle=shuffle,
-                             chunk_size=size_subset, img_transform=img_transform)
+                             img_transform=img_transform)
     tile_dataloader = torch.utils.data.DataLoader(
         tile_dataset,
         batch_size=batch_size,
@@ -33,13 +33,12 @@ def preprocess_image(img):
 class H5Dataset(IterableDataset):
 
     def __init__(self, h5_paths, expr_paths, genes, normalize, shuffle=False,
-                 img_transform=None, chunk_size=None):
+                 img_transform=None):
         self.h5_paths = h5_paths
         self.expr_paths = expr_paths
         self.genes = genes
         self.normalize = normalize
         self.img_transform = img_transform
-        self.chunk_size = chunk_size
         self.n_paths = len(h5_paths)
         self.shuffle = shuffle
 
@@ -89,3 +88,31 @@ class H5Dataset(IterableDataset):
 
     def __getitem__(self, idx):
         pass
+
+
+class DictDataset(Dataset):
+    def __init__(self, dat, dtype=None):
+        self.dat = dat
+        if dtype is None:
+            dtype = torch.float32
+        self.dtype = dtype
+
+    def __len__(self):
+        return len(list(self.dat.values())[0])
+
+    def __getitem__(self, idx):
+        item = {k: v[idx] for (k, v) in self.dat.items()}
+        item = {k: torch.tensor(v, dtype=self.dtype)
+                for (k, v) in item.items()}
+        return item
+
+
+def create_dict_dataloader(data_dict, dtype=None, batch_size=8, shuffle=False, num_workers=0):
+    dict_dataset = DictDataset(data_dict, dtype=dtype)
+    dict_dataloader = torch.utils.data.DataLoader(
+        dict_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=shuffle
+    )
+    return dict_dataloader

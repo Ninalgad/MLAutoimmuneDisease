@@ -8,10 +8,10 @@ from torch.optim import Adam
 from tqdm.notebook import tqdm
 
 from encoder import EncoderNet, ConjoinedNet
-from dataset import create_dataloader
-from eval import evaluate_metric, evaluate_metric_conj
+from dataset import create_h5_dataloader, create_dict_dataloader
 from sae import PartiallySupervisedSAENet
 import utils
+import eval
 
 
 # https://www.kaggle.com/code/bigironsphere/loss-function-library-keras-pytorch
@@ -82,17 +82,13 @@ def train_encoder(args, train_df, validation_df):
     with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
         genes = json.load(f)['genes']
 
-    train_loader = create_dataloader(
-        train_df.patches_path.values, train_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker, shuffle=True
-    )
+    train_loader = create_h5_dataloader(train_df.patches_path.values, train_df.expr_path.values, genes, args.normalize,
+                                        img_transform=None, batch_size=args.batch_size,
+                                        shuffle=True, num_workers=args.num_worker)
 
-    val_loader = create_dataloader(
-        validation_df.patches_path.values, validation_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker,
-    )
+    val_loader = create_h5_dataloader(validation_df.patches_path.values, validation_df.expr_path.values, genes,
+                                      args.normalize, img_transform=None,
+                                      batch_size=args.eval_batch_size, num_workers=args.num_worker)
 
     def train_step_encoder(batch, model, optimizer, device):
         batch = {k: v.to(device).float() for (k, v) in batch.items() if k not in {'coords', 'mask'}}
@@ -118,24 +114,20 @@ def train_encoder(args, train_df, validation_df):
     return training_loop(args, f'{args.model_name}.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
-                         evaluate_metric)
+                         eval.evaluate_metric)
 
 
 def train_conjoined_encoder(args, train_df, validation_df):
     with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
         genes = json.load(f)['genes']
 
-    train_loader = create_dataloader(
-        train_df.patches_path.values, train_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker, shuffle=True
-    )
+    train_loader = create_h5_dataloader(train_df.patches_path.values, train_df.expr_path.values, genes, args.normalize,
+                                        img_transform=None, batch_size=args.batch_size,
+                                        shuffle=True, num_workers=args.num_worker)
 
-    val_loader = create_dataloader(
-        validation_df.patches_path.values, validation_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker,
-    )
+    val_loader = create_h5_dataloader(validation_df.patches_path.values, validation_df.expr_path.values, genes,
+                                      args.normalize, img_transform=None,
+                                      batch_size=args.eval_batch_size, num_workers=args.num_worker)
 
     def train_step_encoder(batch, model, optimizer, device):
         batch = {k: v.to(device).float() for (k, v) in batch.items() if k != 'coords'}
@@ -161,36 +153,63 @@ def train_conjoined_encoder(args, train_df, validation_df):
     return training_loop(args, f'{args.model_name}.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
-                         evaluate_metric_conj)
+                         eval.evaluate_metric_conj)
 
 
 def train_sae(args, train_df, validation_df):
     with open(os.path.join(args.dir_dataset, args.gene_list), 'r') as f:
         genes = json.load(f)['genes']
 
-    train_loader = create_dataloader(
-        train_df.patches_path.values, train_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker, shuffle=True
-    )
+    print('creating h5 datasets')
+    train_loader = create_h5_dataloader(
+        train_df.patches_path.values, train_df.expr_path.values, genes, args.normalize,
+        img_transform=None, batch_size=args.eval_batch_size, shuffle=True, num_workers=args.num_worker)
 
-    val_loader = create_dataloader(
-        validation_df.patches_path.values, validation_df.expr_path.values, genes,
-        args.normalize, img_transform=None, size_subset=args.size_subset,
-        batch_size=args.batch_size, num_workers=args.num_worker,
-    )
+    val_loader = create_h5_dataloader(
+        validation_df.patches_path.values, validation_df.expr_path.values, genes, args.normalize, img_transform=None,
+        batch_size=args.eval_batch_size, num_workers=args.num_worker)
+
+    print('creating cnn model')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = torchvision.models.efficientnet_v2_s().features
+    model = ConjoinedNet(model, 1280)
+    model.to(device)
+
+    print('loading weights from', args.weights_root)
+    model.load_state_dict(torch.load(args.weights_root, device)['model_state_dict'])
+
+    with torch.no_grad():
+        print('predicting embeddings')
+        model.eval()
+        train_x = eval.predict(
+            train_loader, model, device, input_keys=['img', 'mask'], output_keys=['embedding'])['embedding']
+        val_x = eval.predict(
+            val_loader, model, device, input_keys=['img', 'mask'], output_keys=['embedding'])['embedding']
+
+    print('extracting labels')
+    train_y = eval.extract(train_loader, 'adata')
+    val_y = eval.extract(val_loader, 'adata')
+
+    del train_loader, val_loader, model
+
+    train_loader = create_dict_dataloader({'img': train_x, 'adata': train_y},
+                                          batch_size=args.batch_size, shuffle=True, num_workers=args.num_worker)
+    val_loader = create_dict_dataloader({'img': val_x, 'adata': val_y},
+                                        batch_size=args.eval_batch_size, num_workers=args.num_worker)
+
+    del train_x, val_x, train_y, val_y
 
     def train_step_encoder(batch, model, optimizer, device):
-        batch = {k: v.to(device).float() for (k, v) in batch.items() if k != 'coords'}
+        batch = {k: v.to(device).float() for (k, v) in batch.items()}
         optimizer.zero_grad()
 
-        output = model(batch['img'], batch['mask'])
+        output = model(batch['img'])
 
         sparsity_loss = utils.heaviside_step(output['features'] - 0.01)
         sparsity_loss = sparsity_loss.mean() ** 0.5
 
         loss_ = regression_loss_func_l2(output['reg'], batch['adata'])
-        loss_ += regression_loss_func_l2(output['reconstructed'], output['activations'])
+        loss_ += regression_loss_func_l2(output['reconstructed'], batch['img'])
         loss_ += 1e-2 * sparsity_loss
 
         loss_.backward()
@@ -198,17 +217,9 @@ def train_sae(args, train_df, validation_df):
 
         return loss_.detach().cpu().numpy()
 
-    print('training SAE ConjoinedNet efficientnet_v2_s')
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    model = torchvision.models.efficientnet_v2_s().features
-    model = ConjoinedNet(model, 1280)
-    model.to(device)
-
-    model.load_state_dict(torch.load(args.weights_root, device)['model_state_dict'])
-
+    print(f'training SAE({args.n_features}) ConjoinedNet')
     model = PartiallySupervisedSAENet(
-        model, activation_output_dim=1280, reg_output_dim=460, n_features=32 * 1280)
+        activation_output_dim=1280, reg_output_dim=460, n_features=args.n_features)
     model.to(device)
 
     optimizer = Adam(model.parameters(), lr=args.learning_rate)
@@ -216,7 +227,7 @@ def train_sae(args, train_df, validation_df):
     return training_loop(args, f'{args.model_name}-sae.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
-                         evaluate_metric_conj)
+                         eval.evaluate_metric_conj)
 
 
 def training_loop(args, weights_save_path, train_step,
