@@ -61,8 +61,7 @@ def offload(tensor):
     return tensor.detach().cpu().numpy()
 
 
-def predict(dataloader, model, device, input_keys=None, output_keys=None,
-            half_precision=False, debug=False):
+def predict(dataloader, model, device, input_keys=None, output_keys=None, half_precision=False, debug=False):
     outputs = None
     for batch in tqdm(dataloader, total=len(dataloader)):
 
@@ -90,3 +89,25 @@ def predict(dataloader, model, device, input_keys=None, output_keys=None,
             break
 
     return outputs
+
+
+def predict_features(dataloader, model, device, subset=None, half_precision=False, debug=False):
+
+    outputs = []
+    for batch in tqdm(dataloader, total=len(dataloader)):
+
+        feat = model(batch['img'].to(device).float())['features']
+
+        if subset is not None:
+            min_, max_ = subset
+            feat = feat[:, min_:max_]
+
+        if half_precision:
+            feat = feat.half()
+
+        outputs.append(offload(feat))
+
+        if debug:
+            break
+
+    return np.concatenate(outputs, axis=0)
