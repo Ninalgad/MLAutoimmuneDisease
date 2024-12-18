@@ -46,7 +46,7 @@ def evaluate_metric(args, val_loader, model, device):
 def evaluate_metric_conj(args, val_loader, model, device):
     y = extract(val_loader, 'adata', debug=args.debug)
     p = predict(val_loader, model, device,
-                input_keys=['img'], output_keys=['reg'],
+                input_keys=['img', 'mask'], output_keys=['reg'],
                 debug=args.debug)['reg']
 
     res = {

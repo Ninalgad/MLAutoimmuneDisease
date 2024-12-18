@@ -10,8 +10,8 @@ from tqdm.notebook import tqdm
 from encoder import EncoderNet, ConjoinedNet
 from dataset import create_h5_dataloader, create_dict_dataloader
 from sae import PartiallySupervisedSAENet
-import utils
-import eval
+from utils import *
+from eval import *
 
 
 # https://www.kaggle.com/code/bigironsphere/loss-function-library-keras-pytorch
@@ -114,7 +114,7 @@ def train_encoder(args, train_df, validation_df):
     return training_loop(args, f'{args.model_name}.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
-                         eval.evaluate_metric)
+                         evaluate_metric)
 
 
 def train_conjoined_encoder(args, train_df, validation_df):
@@ -153,7 +153,7 @@ def train_conjoined_encoder(args, train_df, validation_df):
     return training_loop(args, f'{args.model_name}.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
-                         eval.evaluate_metric_conj)
+                         evaluate_metric_conj)
 
 
 def train_sae(args, train_df, validation_df):
@@ -181,14 +181,14 @@ def train_sae(args, train_df, validation_df):
     with torch.no_grad():
         print('predicting embeddings')
         model.eval()
-        train_x = eval.predict(
+        train_x = predict(
             train_loader, model, device, input_keys=['img', 'mask'], output_keys=['embedding'])['embedding']
-        val_x = eval.predict(
+        val_x = predict(
             val_loader, model, device, input_keys=['img', 'mask'], output_keys=['embedding'])['embedding']
 
     print('extracting labels')
-    train_y = eval.extract(train_loader, 'adata')
-    val_y = eval.extract(val_loader, 'adata')
+    train_y = extract(train_loader, 'adata')
+    val_y = extract(val_loader, 'adata')
 
     del train_loader, val_loader, model
 
@@ -205,7 +205,7 @@ def train_sae(args, train_df, validation_df):
 
         output = model(batch['img'])
 
-        sparsity_loss = utils.heaviside_step(output['features'] - 0.01)
+        sparsity_loss = heaviside_step(output['features'] - 0.01)
         sparsity_loss = sparsity_loss.mean() ** 0.5
 
         loss_ = regression_loss_func_l2(output['reg'], batch['adata'])
@@ -227,7 +227,7 @@ def train_sae(args, train_df, validation_df):
     return training_loop(args, f'{args.model_name}-sae.pt', train_step_encoder,
                          train_loader, val_loader,
                          model, optimizer, device,
-                         eval.evaluate_metric_conj)
+                         evaluate_metric_conj)
 
 
 def training_loop(args, weights_save_path, train_step,

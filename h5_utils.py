@@ -39,7 +39,7 @@ def save_hdf5(output_fpath, asset_dict, attr_dict=None, mode='a', auto_chunk=Tru
 
                 if data_type.kind == 'U':  # Handle Unicode strings
                     chunks = (1, 1)
-                    max_shape = (None, 1)
+                    maxshape = (None, 1)
                     data_type = h5py.string_dtype(encoding='utf-8')
                 else:
                     if data_type == np.object_:
@@ -239,7 +239,7 @@ class Patcher:
             }
 
             if self.mask is not None:
-                asset_dict['mask'] = np.expand_dims(mask_tile, axis=0),  # Shape (1, h, w, 1)
+                asset_dict['mask'] = np.expand_dims(mask_tile, axis=0)  # Shape (1, h, w, 1)
 
             # Add any extra assets to the asset dictionary
             extra_asset_dict = {key: np.expand_dims([value[i]], axis=0) for key, value in extra_assets.items()}

@@ -7,7 +7,7 @@ from utils import load_adata
 
 def create_h5_dataloader(tile_h5_paths, expr_paths, genes, normalize, img_transform,
                          batch_size=8, shuffle=False, num_workers=0):
-    tile_dataset = H5Dataset(tile_h5_paths, expr_paths, genes, normalize, shuffle=shuffle,
+    tile_dataset = H5Dataset(tile_h5_paths, genes, normalize, expr_paths, shuffle=shuffle,
                              img_transform=img_transform)
     tile_dataloader = torch.utils.data.DataLoader(
         tile_dataset,
@@ -32,7 +32,7 @@ def preprocess_image(img):
 
 class H5Dataset(IterableDataset):
 
-    def __init__(self, h5_paths, expr_paths, genes, normalize, shuffle=False,
+    def __init__(self, h5_paths, genes, normalize, expr_paths=None, shuffle=False,
                  img_transform=None):
         self.h5_paths = h5_paths
         self.expr_paths = expr_paths
@@ -53,9 +53,12 @@ class H5Dataset(IterableDataset):
     def _assign_assets(self, idx):
         self.assets, _ = read_assets_from_h5(self.h5_paths[idx])
         barcodes = self.assets['barcode'].flatten().astype(str).tolist()
-        adata = load_adata(self.expr_paths[idx], genes=self.genes,
-                           barcodes=barcodes, normalize=self.normalize)
-        self.assets['adata'] = adata.values
+        if self.expr_paths is not None:
+            adata = load_adata(self.expr_paths[idx], genes=self.genes,
+                               barcodes=barcodes, normalize=self.normalize)
+            self.assets['adata'] = adata.values
+        else:
+            self.assets['adata'] = None
 
     def __len__(self):
         return sum(self.chunk_sizes)
@@ -73,8 +76,11 @@ class H5Dataset(IterableDataset):
                 barcode = int(barcode[1:])
 
                 item = {'img': preprocess_image(self.assets['img'][j]),
-                        'adata': self.assets['adata'][j],
                         'mask': self.assets['mask'][j] == barcode}
+
+                if self.assets['adata'] is not None:
+                    item['adata'] = self.assets['adata'][j]
+
                 item = {k: torch.tensor(v, dtype=torch.float32)
                         for (k, v) in item.items()}
 
